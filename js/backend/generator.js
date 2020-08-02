@@ -30,6 +30,11 @@ nomnom.options({
 		help: 'Print message and errors.',
 		flag: true
 	},
+	'simplecalc': {
+		abbr: 's',
+		help: 'Simple size calculation based on file size.',
+		flag: true
+	},
  			'exclude': {
  				abbr: 'x',
  				help: 'List of file patterns to exclude (comma separated)',
@@ -190,83 +195,132 @@ function processPath(currentPath) {
 				}
 				Waiting.end();
 			} else {
-				fs.readFile(currentPath, 'utf8', function(error, content) {
-					var err, tmp;
-					currentPath = path.relative(consoleArguments.project, currentPath);
-					if(error) {
-						console.log(error);
-					} else {
-						if(currentPath == '') {
-							// project off only one file
-							currentPath = path.basename(consoleArguments.project);
-						}
-						if(consoleArguments.verbose) {
-							console.log('Analyzing file: ' + currentPath);
-						}
-						err = false;
-						try {
-							tmp = esprima.parse(content, {loc: true, tolerant: true});
-							if(tmp.errors && tmp.errors.length) {
-								console.log(currentPath, tmp);
-								err = tmp.errors;
-								tmp = {
-									type: 'Program',
-									tooltip: 'File: ' + currentPath + ', ' + tmp.errors[0].toString(),
-									loc: {
-										start: {
-											line: 1
-										},
-										end: {
-											line: err.length
-										}
-									}
-								};
-							}
-						} catch(e) {
-							console.log(currentPath, e);
-							tmp = {
-								type: 'Program',
-								tooltip: 'File: ' + currentPath + ', ' + e.toString(),
-								loc: {
-									start: {
-										line: 1
-									},
-									end: {
-										line: 1
-									}
-								}
-							};
-						}
-						(function (obj, currentPath, val) {
-							var i, t,
-							current = '',
-							parts = currentPath.split(path.sep);
-							for (i = 0, t = parts.length; i < t; i++) {
-								if(i>0) {
-									current += path.sep;
-								}
-								current += parts[i];
-								if (!hasOwnProperty.call(obj, parts[i])) {
-									obj[parts[i]] = {
-										children: {},
-										path: current
-									};
-								}
-
-								if((i+1)<t) {
-									obj = obj[parts[i]].children;
-								} else {
-									obj[parts[i]] = val;
-								}
-							}
-						})(listAST, currentPath, tmp);
-					}
-					Waiting.end();
-				});
+				processFile(currentPath);			
 			}
 		}
 	});
 }
+
+function processFile(currentPath) {
+	fs.readFile(currentPath, 'utf8', function(error, content) {
+		var tmp;
+		currentPath = path.relative(consoleArguments.project, currentPath);
+		if(error) {
+			console.log(error);
+		} else {
+			if(currentPath == '') {
+				// project off only one file
+				currentPath = path.basename(consoleArguments.project);
+			}
+			if(consoleArguments.verbose) {
+				console.log('Analyzing file: ' + currentPath);
+			}
+			if (consoleArguments.simplecalc) {
+				tmp = parseFileWithSimpleSizeAnalysis(content, currentPath);
+			} else {
+				tmp = parseFile(tmp, content, currentPath);
+			}
+
+			createOrAddElementsToAST(listAST, currentPath, tmp);
+		}
+		Waiting.end();
+	});
+}
+
+function createOrAddElementsToAST(astElement, currentPath, val) {
+	var i, t,
+	current = '',
+	parts = currentPath.split(path.sep);
+	for (i = 0, t = parts.length; i < t; i++) {
+		if(i>0) {
+			current += path.sep;
+		}
+		current += parts[i];
+		if (!hasOwnProperty.call(astElement, parts[i])) {
+			astElement[parts[i]] = { // create new path element. 
+									// Assumption: If not a leaf there will be no type assigned to this node. Will later be recognized as a folder.
+				children: {},
+				path: current
+			};
+		}
+
+		if((i+1)<t) { // if still not at the leaf
+			astElement = astElement[parts[i]].children; // move obj reference one level deeper
+		} else { // if obj is leaf, then assign the value. Value example { type:'Program', loc:{start:{column:1,line:1}, end:{column:88, line:77}}}. Value contains the whole unit structure
+			astElement[parts[i]] = val;
+		}
+	}
+}
+
+function parseFileWithSimpleSizeAnalysis(content, currentPath) {
+	var fileLength = content.split(/\r\n|\r|\n/).length;
+	var result = { 
+		type: 'Program', 
+		tooltip: 'File: ' + currentPath, 
+		loc:{
+			start:{
+				column:1,
+				line:1
+			},
+			end:{
+				column:1, 
+				line:fileLength}
+		},
+		body : {
+			type: 'FunctionDeclaration',
+			loc:{
+				start:{
+					column:1,
+					line:1
+				},
+				end:{
+					column:1, 
+					line:fileLength}
+			}	
+		}
+	};
+	return result;
+}
+
+function parseFile(tmp, content, currentPath) {
+	var err = false;
+	try {
+		tmp = esprima.parse(content, { loc: true, tolerant: true });
+		if (tmp.errors && tmp.errors.length) {
+			console.log(currentPath, tmp);
+			err = tmp.errors;
+			tmp = {
+				type: 'Program',
+				tooltip: 'File: ' + currentPath + ', ' + tmp.errors[0].toString(),
+				loc: {
+					start: {
+						line: 1
+					},
+					end: {
+						line: err.length
+					}
+				}
+			};
+		}
+	}
+	catch (e) {
+		console.log(currentPath, e);
+		tmp = {
+			type: 'Program',
+			tooltip: 'File: ' + currentPath + ', ' + e.toString(),
+			loc: {
+				start: {
+					line: 1
+				},
+				end: {
+					line: 1
+				}
+			}
+		};
+	}
+	return tmp;
+}
+
 /**
  * Description
  *
@@ -307,16 +361,16 @@ function processAST() {
 		if(!deep) deep = 0;
 		var record = null, loc;
 
-		function add(no) {
+		function add(no) { // no = record 
 			if(no){
 				var child, deepLocal = deep, place = record||father;
 				if(no.type == 'BlockStatement') {
 					++deepLocal;
 				} else if(place.width && no.type == 'VariableDeclarator') {
 
-					place.addWidth(1);
+					place.addWidth(1); // add width for every var declaration
 				}
-				child = buildAST(no, name, deepLocal, place);
+				child = buildAST(no, name, deepLocal, place); // ??? another recursive traversal of the AST?
 				if(child) {
 					if(place.addWidth && child.width) {
 						place.addWidth(child.width);
@@ -326,15 +380,22 @@ function processAST() {
 				}
 			}
 		}
+
 		if(typeOf(tree)=='object') {
 			if(tree.type=='Program' || tree.type=='FunctionDeclaration' || tree.type=='FunctionExpression') {
 				loc = 1+tree.loc.end.line-tree.loc.start.line;
+				var initialWidth;
+				if (consoleArguments.simplecalc) {
+					initialWidth = 1+tree.loc.end.line-tree.loc.start.line;
+				} else {
+					initialWidth = 1;
+				}
 				if(tree.type != 'Program') {
 					name = (tree['id'] && (typeof(tree['id']['name'])=='string')?tree['id']['name']:CONST_ANONYMOUS);
 					record = {
 						name: name,
 						height: loc,
-						width: 1,
+						width: initialWidth,
 						addWidth: function (n) {
 							this.width += n;
 							if(this.father && this.father.addWidth) {
@@ -353,14 +414,14 @@ function processAST() {
 						tb_building: []
 					};
 				}
-			} else if(tree.type=='CallExpression' &&
+			} else if(tree.type=='CallExpression' &&  // searching for 'define...' or ' var x = angular.module(... '
 				(tree.callee.name == 'define' ||
 					(tree.callee.object && tree.callee.object.name == 'angular' &&
 						tree.callee.property && tree.callee.property.name == 'module'
 					)
 				)
 			) {
-				name = 'Module';
+				name = 'Module';   // distro-a/angular-1.js,  distro-b/index.js: define...  This predicate does not match for the second case in distro-b.
 				if(tree.arguments.length && tree.arguments[0].type == 'Literal' && typeOf(tree.arguments[0].value)=='string') {
 					name += ': ' + tree.arguments[0].value;
 				}
